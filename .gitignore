@@ -46,3 +46,6 @@ crash.*.log
 
 # Ignore log files
 *.log
+
+# Notes
+notes.txt

@@ -27,8 +27,8 @@ jobs:
         uses: google-github-actions/auth@v2
         with:
           token_format: 'access_token'
-          workload_identity_provider: projects/${{ env.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/gh-pool-99639/providers/github-99639
-          service_account: gha-deployer-99639@${{ env.GCP_PROJECT_ID }}.iam.gserviceaccount.com
+          workload_identity_provider: projects/${{ env.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/gh-pool-69133/providers/github-69133
+          service_account: gha-deployer-69133@${{ env.GCP_PROJECT_ID }}.iam.gserviceaccount.com
           export_environment_variables: true
 
       - name: 'Set up Cloud SDK'
