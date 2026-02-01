@@ -1,9 +1,10 @@
 name: Terraform Deploy with WIF
 on:
-  pull_request:
+  #pull_request:
   push:
     branches:
       - main
+      - feature/ci-cd
   workflow_dispatch:
 
 permissions:
