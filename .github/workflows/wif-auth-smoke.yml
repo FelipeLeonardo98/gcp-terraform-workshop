@@ -1,0 +1,151 @@
+name: Terraform Deploy with WIF
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    env:
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      GCP_PROJECT_NUMBER: ${{ secrets.GCP_PROJECT_NUMBER }}
+      TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          token_format: 'access_token'
+          workload_identity_provider: projects/${{ env.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/gh-pool-99639/providers/github-99639
+          service_account: gha-deployer-99639@${{ env.GCP_PROJECT_ID }}.iam.gserviceaccount.com
+          export_environment_variables: true
+
+      - name: 'Set up Cloud SDK'
+        uses: 'google-github-actions/setup-gcloud@v2'
+        with:
+          version: '>= 442.0.0'
+
+      - id: 'gcloud'    
+        name: 'gcloud'
+        run: |-
+          gcloud config set project ${{ env.GCP_PROJECT_ID }}
+          gcloud auth list
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.8.0
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Format check
+        run: terraform fmt
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          set -o pipefail
+          terraform plan -no-color -detailed-exitcode -var="project_id=${{ env.GCP_PROJECT_ID }}" | tee tfplan.txt
+          echo "exitcode=$?" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Capture Plan Exit Code
+        id: check_plan
+        run: |
+          echo "exitcode=${{ steps.plan.outcome == 'success' && '0' || (steps.plan.outcome == 'failure' && '1' || '2') }}" >> $GITHUB_OUTPUT
+
+      - name: Comment Terraform Plan on PR (even if push to PR branch)
+        uses: actions/github-script@v7
+        if: (steps.plan.outcome == 'success' || steps.plan.outcome == 'failure') && !(github.event_name == 'push' && github.ref == 'refs/heads/main')
+        with:
+          script: |
+            const fs = require('fs');
+            
+            // Debug: Log the context information
+            console.log(`Event: ${context.eventName}`);
+            console.log(`Ref: ${context.ref}`);
+            console.log(`Head ref: ${context.payload.pull_request?.head?.ref || 'N/A'}`);
+            console.log(`PR number: ${context.payload.pull_request?.number || 'N/A'}`);
+            
+            let prNumber;
+            let branchName;
+            
+            // If this is a pull_request event, use the PR number directly
+            if (context.eventName === 'pull_request') {
+              prNumber = context.payload.pull_request.number;
+              branchName = context.payload.pull_request.head.ref;
+              console.log(`✅ Using PR from pull_request event: #${prNumber}`);
+            } else {
+              // For push events, try to find the PR by branch name
+              branchName = context.ref.replace('refs/heads/', '');
+              console.log(`🔍 Looking for PR with head branch: ${context.repo.owner}:${branchName}`);
+              
+              const prs = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                head: `${context.repo.owner}:${branchName}`,
+                state: 'open'
+              });
+              
+              if (!prs.data.length) {
+                console.log("❌ No open PR found for this branch, skipping comment.");
+                return;
+              }
+              prNumber = prs.data[0].number;
+              console.log(`✅ Found PR from branch lookup: #${prNumber}`);
+            }
+            
+            if (!prNumber) {
+              console.log("❌ Could not determine PR number, skipping comment.");
+              return;
+            }
+            
+            // Read and process the plan output
+            const planOutput = fs.readFileSync('tfplan.txt', 'utf8');
+            const summaryMatch = planOutput.match(/Plan: (\d+) to add, (\d+) to change, (\d+) to destroy./);
+            let summary;
+            if (summaryMatch) {
+              summary = `\u0060\u0060\u0060\nCreate: ${summaryMatch[1]}\nUpdate: ${summaryMatch[2]}\nDelete: ${summaryMatch[3]}\n\u0060\u0060\u0060`;
+            } else if (/No changes. Your infrastructure matches the configuration\./.test(planOutput)) {
+              summary = '```\nCreate: 0\nUpdate: 0\nDelete: 0\n```';
+            } else {
+              summary = '⚠️ Could not parse summary from plan output.';
+            }
+            
+            const collapsedDetails = `<details>\n<summary>Show Plan Details</summary>\n\n\u0060\u0060\u0060hcl\n${planOutput.slice(0, 60000)}\n\u0060\u0060\u0060\n</details>`;
+            const meta = `\n\nPusher: @${context.actor}, Branch: \`${branchName}\`, Workflow: \`${context.workflow}\``;
+            const body = [
+              "## Terraform Plan Summary",
+              summary,
+              collapsedDetails,
+              meta
+            ].join("\n");
+            
+            console.log(`💬 Posting comment to PR #${prNumber}`);
+            await github.rest.issues.createComment({
+              issue_number: prNumber,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+      - name: Fail if Terraform Plan failed (syntax or auth issue)
+        if: steps.plan.outputs.exitcode == '1'
+        run: |
+          echo "❌ Terraform plan failed with exit code 1"
+          exit 1
+
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        run: terraform apply -auto-approve -var="project_id=${{ env.GCP_PROJECT_ID }}"
