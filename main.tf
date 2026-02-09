@@ -5,7 +5,7 @@ terraform {
   }
 }
 variable "project_id" {
-  type = string
+  type    = string
   default = "workloads-98"
 }
 
